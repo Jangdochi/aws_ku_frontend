@@ -1,24 +1,15 @@
-name: Frontend → EKS Deploy
+name: Frontend → ArgoCD Deploy
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# ──────────────────────────────────────────────────────────────────────────
-# 이 repo의 GitHub Secrets에 등록할 값:
-#   AWS_ACCESS_KEY_ID          IAM 액세스 키
-#   AWS_SECRET_ACCESS_KEY      IAM 시크릿 키
-#   ECR_FRONTEND_URI           terraform output -raw ecr_frontend_repository_url
-#   EKS_CLUSTER_NAME           terraform output -raw eks_cluster_name
-# ──────────────────────────────────────────────────────────────────────────
-
 env:
   AWS_REGION: us-east-1
 
 jobs:
   deploy:
-    name: Build & Deploy Frontend
     runs-on: ubuntu-latest
 
     steps:
@@ -46,30 +37,27 @@ jobs:
           docker push $ECR:$TAG
           docker push $ECR:latest
 
-      - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig \
-            --region ${{ env.AWS_REGION }} \
-            --name   ${{ secrets.EKS_CLUSTER_NAME }}
+      - name: Checkout Infra Repository
+        uses: actions/checkout@v3
+        with:
+          repository: Jangdochi/aws_ku_infra
+          token: ${{ secrets.ARGOCD_GITHUB_TOKEN }}
+          path: infra-repo
 
-      - name: Create namespace if not exists
+      - name: Update Manifest
         run: |
-          kubectl get namespace sample-app || kubectl create namespace sample-app     
-          
-      - name: Deploy to EKS
-        env:
-          FRONTEND_IMAGE: "${{ secrets.ECR_FRONTEND_URI }}:${{ github.sha }}"
-        run: |
-          envsubst < k8s/frontend.yaml | kubectl apply -f -
+          cd infra-repo
+          sed -i "s|image:.*|image: ${{ secrets.ECR_FRONTEND_URI }}:${{ github.sha }}|g" manifests/frontend/frontend.yaml
 
-      - name: Wait for Rollout
+      - name: Commit and Push Changes
         run: |
-          kubectl rollout status deployment/frontend \
-            -n sample-app --timeout=300s
+          cd infra-repo
+          git config --global user.name "github-actions"
+          git config --global user.email "action@github.com"
+          git add manifests/frontend/frontend.yaml
 
-      - name: Show Access URL
-        run: |
-          echo "접속 URL:"
-          kubectl get svc frontend-service -n sample-app \
-            -o jsonpath='http://{.status.loadBalancer.ingress[0].hostname}{"\n"}'
-
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "chore: update frontend image to ${{ github.sha }} [skip ci]"
+            git push origin main
+          else
+            echo "No changes to commit"
